@@ -73,9 +73,17 @@ async function auditNode(state: State): Promise<Update> {
         typeof a.metadata.rule === "string" ? a.metadata.rule : a.content,
       ]),
     );
+    const atomById = new Map(state.atoms.map((a) => [a.id, a]));
+    const hitsProhibition = output.violations.some(
+      (v) => atomById.get(v.rule_id)?.isNegative === true,
+    );
     const report: AuditReport = {
-      // Derived here so status can never contradict score.
-      status: output.score >= AUDIT_PASS_THRESHOLD ? "PASS" : "FAIL",
+      // Derived in code, never by the LLM. Any violated prohibition is an
+      // automatic FAIL regardless of score.
+      status:
+        output.score >= AUDIT_PASS_THRESHOLD && !hitsProhibition
+          ? "PASS"
+          : "FAIL",
       score: output.score,
       feedback: output.feedback,
       violations: output.violations.map((v) => ({

@@ -30,44 +30,76 @@ export function ConsoleDashboard({ initialMemory }: ConsoleDashboardProps) {
   const [content, setContent] = useState("");
   const [auditResults, setAuditResults] = useState<AuditReport | null>(null);
   const [auditError, setAuditError] = useState<string | null>(null);
-  const [dismissedError, setDismissedError] = useState<string | null>(null);
+  const [currentError, setCurrentError] = useState<string | null>(
+    initialMemory.error ?? null,
+  );
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const refreshMemory = useCallback(async () => {
-    const status = await getMemoryStatus();
-    setHasMemory(status.hasMemory);
-    setRuleCount(status.count || 0);
+    try {
+      const status = await getMemoryStatus();
+      if (status.error) {
+        setCurrentError(status.error);
+        return;
+      }
+      setHasMemory(status.hasMemory);
+      setRuleCount(status.count || 0);
+    } catch (err: unknown) {
+      console.error("[refreshMemory] Unexpected error:", err);
+    }
   }, []);
 
-  const [ingestState, ingestAction, isUploading] = useActionState<
+  const [, ingestAction, isUploading] = useActionState<
     ActionState,
     FormData
   >(
     async (_prevState: ActionState, formData: FormData) => {
-      const result = await handleIngestion(formData);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-      if (result.success) {
-        await refreshMemory();
+      setCurrentError(null);
+      try {
+        const result = await handleIngestion(formData);
+        if (result.success) {
+          if (fileInputRef.current) fileInputRef.current.value = "";
+          setCurrentError(null);
+          await refreshMemory();
+        } else if (result.error) {
+          setCurrentError(result.error);
+        }
+        return result;
+      } catch (err: unknown) {
+        console.error("[useActionState] handleIngestion error:", err);
+        const fallbackMsg =
+          err instanceof Error
+            ? err.message
+            : "Failed to upload file. Please check your connection and try again.";
+        setCurrentError(fallbackMsg);
+        return { success: false, error: fallbackMsg };
       }
-      return result;
     },
     { success: false, fileName: null, error: null },
-  );
-
-  const showError = Boolean(
-    ingestState.error && dismissedError !== ingestState.error,
   );
 
   const confirmClear = () => {
     if (isAuditing || isClearing) return;
     setShowClearConfirm(false);
     startClearing(async () => {
-      const res = await clearMemory();
-      if (res.success) {
-        setHasMemory(false);
-        setRuleCount(0);
-        setAuditResults(null);
-        setAuditError(null);
+      try {
+        const res = await clearMemory();
+        if (res.success) {
+          setHasMemory(false);
+          setRuleCount(0);
+          setAuditResults(null);
+          setAuditError(null);
+          setCurrentError(null);
+        } else {
+          setCurrentError(res.error || "Failed to clear memory context.");
+        }
+      } catch (err: unknown) {
+        console.error("[confirmClear] Unexpected error:", err);
+        setCurrentError(
+          err instanceof Error
+            ? err.message
+            : "An unexpected error occurred while clearing memory context.",
+        );
       }
     });
   };
@@ -85,9 +117,14 @@ export function ConsoleDashboard({ initialMemory }: ConsoleDashboardProps) {
           setAuditResults(null);
           setAuditError(response.message);
         }
-      } catch {
+      } catch (err: unknown) {
+        console.error("[triggerAudit] Unexpected error:", err);
         setAuditResults(null);
-        setAuditError("Audit request failed. Please try again.");
+        setAuditError(
+          err instanceof Error
+            ? err.message
+            : "Audit request failed. Please try again.",
+        );
       }
     });
   };
@@ -120,11 +157,11 @@ export function ConsoleDashboard({ initialMemory }: ConsoleDashboardProps) {
             isClearing={isClearing}
             isAuditing={isAuditing}
             isUploading={isUploading}
-            showError={showError}
-            errorMessage={ingestState.error}
+            showError={Boolean(currentError)}
+            errorMessage={currentError}
             fileInputRef={fileInputRef}
             onClearClick={() => setShowClearConfirm(true)}
-            onDismissError={() => setDismissedError(ingestState.error ?? null)}
+            onDismissError={() => setCurrentError(null)}
             ingestAction={ingestAction}
           />
 

@@ -1,6 +1,12 @@
 import { supabase, SUPABASE_TABLE } from "../lib/supabase";
 
-export async function getMemoryStatusCore() {
+export interface MemoryStatusResult {
+  hasMemory: boolean;
+  count: number;
+  error?: string;
+}
+
+export async function getMemoryStatusCore(): Promise<MemoryStatusResult> {
   try {
     const { count, error } = await supabase
       .from(SUPABASE_TABLE)
@@ -8,14 +14,18 @@ export async function getMemoryStatusCore() {
 
     if (error) {
       console.error("Error fetching memory status:", error.message);
-      return { hasMemory: false, count: 0 };
+      return { hasMemory: false, count: 0, error: error.message };
     }
 
     const totalCount = count ?? 0;
     return { hasMemory: totalCount > 0, count: totalCount };
   } catch (error) {
     console.error("Failed to get memory status:", error);
-    return { hasMemory: false, count: 0 };
+    return {
+      hasMemory: false,
+      count: 0,
+      error: error instanceof Error ? error.message : "Unknown error",
+    };
   }
 }
 

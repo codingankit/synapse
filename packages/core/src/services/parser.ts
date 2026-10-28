@@ -18,6 +18,7 @@ function getLlamaClient(): LlamaCloud {
 }
 
 const MAX_POLL_RETRIES = 60; // 3-minute timeout (60 * 3000ms)
+const MAX_CONSECUTIVE_POLL_ERRORS = 3;
 const POLL_INTERVAL_MS = 3000;
 
 export async function parseBrandBible(
@@ -57,14 +58,30 @@ export async function parseBrandBible(
 
     console.log("[Parser] Parse job created. Job ID:", job.id);
 
+    const fetchJob = () =>
+      llamaClient.parsing.get(job.id, { expand: ["markdown_full"] });
+
     let attempts = 0;
+    let consecutivePollErrors = 0;
 
     while (attempts < MAX_POLL_RETRIES) {
       attempts++;
 
-      const currentResult = await llamaClient.parsing.get(job.id, {
-        expand: ["markdown_full"],
-      });
+      let currentResult: Awaited<ReturnType<typeof fetchJob>>;
+      try {
+        currentResult = await fetchJob();
+        consecutivePollErrors = 0;
+      } catch (pollErr) {
+        // A single network blip shouldn't abort a multi-minute parse job.
+        if (++consecutivePollErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
+          throw pollErr;
+        }
+        console.warn(
+          `[Parser] Poll failed (${consecutivePollErrors}/${MAX_CONSECUTIVE_POLL_ERRORS}), retrying...`,
+        );
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+        continue;
+      }
 
       const status = currentResult.job.status;
 

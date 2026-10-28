@@ -18,9 +18,9 @@ Brand Bible (PDF) ──► rule atoms ──► Supabase (pgvector + FTS)
 
 - **Atomic rules** — each extracted rule is one enforceable requirement with a category, context (platform), polarity (requirement / prohibition) and a verbatim source quote.
 - **Hybrid retrieval** — vector search + full-text search fused with Reciprocal Rank Fusion in Postgres, then reranked with Voyage.
-- **Prohibitions are never missed** — every prohibition and every `Global` rule is pulled into the candidate pool, so a banned-word list can't be lost because the draft isn't semantically close to it.
+- **Prohibitions are prioritised** — prohibitions and `Global` rules (up to 30) are pulled into the candidate pool regardless of semantic similarity, and up to 5 are kept even if the reranker scores them low. A warning is logged if the cap is hit.
 - **Verbatim directives** — `get-context` returns the stored rules as-is, split into `MUST FOLLOW` / `MUST NOT`. No LLM paraphrase of a legal rule, and latency stays at embed + search + rerank.
-- **Status can't contradict score** — the LLM returns a score and violations; `PASS`/`FAIL` is derived in code (`score >= 80`).
+- **Status is derived in code** — the LLM returns a score and violations; `PASS` requires `score >= 80` and no violated prohibition.
 - **Audit → rewrite → re-audit loop** — optionally rewrites a failing draft and re-audits it (up to 3 revisions).
 - **Fails loudly** — an outage is never reported as "no rules apply". Every retrieval/audit/context call returns an explicit `ok: false` with a typed reason.
 - **Prompt-injection fencing** — draft content is treated as untrusted data inside `<proposed_content>` tags; fence tags are stripped from user text before it reaches a prompt.
@@ -115,7 +115,7 @@ flowchart LR
 ```
 
 - The audit LLM sees only the retrieved rules (as `<rule id="…">`) and must cite a `rule_id` for every violation. Cited IDs are resolved back to the rule text.
-- **Scoring:** `100` = perfect, `80–99` = `PASS` with minor tone adjustments, `0–79` = `FAIL`. Status is computed in code from the score.
+- **Scoring:** `100` = perfect, `80–99` = `PASS` with minor tone adjustments, `0–79` = `FAIL`. Status is computed in code; any violated prohibition forces `FAIL` regardless of score.
 - `maxRevisions` is clamped to `0–3` (default `0` = audit only). With `N` revisions, up to `N + 1` audits run.
 - If a rewrite or re-audit fails mid-loop, the last good report is kept and the loop halts.
 - `revisedContent` is returned only when the audited draft differs from the input.

@@ -97,6 +97,12 @@ export async function retrieveAtoms(query: string): Promise<RetrievalResult> {
   const hybridRows = (hybrid.data ?? []) as MatchRow[];
   const pinnedRows = (pinned.data ?? []) as MatchRow[];
 
+  if (pinnedRows.length >= PINNED_FETCH_LIMIT) {
+    console.warn(
+      `[Retrieval] Pinned rules hit the ${PINNED_FETCH_LIMIT}-row cap; some prohibitions/Global rules may be omitted.`,
+    );
+  }
+
   if (hybridRows.length === 0 && pinnedRows.length === 0) {
     return {
       ok: false,

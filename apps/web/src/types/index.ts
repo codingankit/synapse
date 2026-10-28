@@ -13,6 +13,7 @@ export type AuditActionResult =
 export interface MemoryStatus {
   hasMemory: boolean;
   count: number;
+  error?: string;
 }
 
 export interface ConfirmClearModalProps {
@@ -54,4 +55,9 @@ export interface AuditFeedbackProps {
 
 export interface ConsoleDashboardProps {
   initialMemory: MemoryStatus;
+}
+
+export enum MaxFileSize {
+  MB = 5,
+  BYTES = MB * 1024 * 1024,
 }
