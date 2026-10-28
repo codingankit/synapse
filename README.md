@@ -230,110 +230,121 @@ Run once in the Supabase SQL editor. This creates the table, indexes, and the hy
 ---------------------------------------------------------
 -- 0. Extension
 ---------------------------------------------------------
-create extension if not exists vector;
+-- Enable the pgvector extension to support vector data types and similarity search
+CREATE EXTENSION IF NOT EXISTS vector;
 
 ---------------------------------------------------------
 -- 1. Table: synapse_memory
 ---------------------------------------------------------
-create table if not exists synapse_memory (
-  id          uuid primary key default gen_random_uuid(),
-  content     text not null,
-  embedding   vector(1024) not null,
-  metadata    jsonb not null default '{}'::jsonb,
-  fts_content tsvector generated always as (to_tsvector('english', content)) stored,
-  created_at  timestamptz not null default now(),
-  updated_at  timestamptz not null default now()
+CREATE TABLE IF NOT EXISTS synapse_memory (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  content     TEXT NOT NULL,
+  embedding   VECTOR(1024) NOT NULL,
+  metadata    JSONB NOT NULL DEFAULT '{}'::jsonb,
+  fts_content TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-create or replace function set_updated_at()
-returns trigger as $$
-begin
-  new.updated_at = now();
-  return new;
-end;
-$$ language plpgsql;
+-- Enable Row Level Security (RLS) to enforce data isolation and
+-- ensure queries only access rows permitted by active security policies.
+ALTER TABLE synapse_memory ENABLE ROW LEVEL SECURITY;
 
-drop trigger if exists trg_synapse_memory_updated_at on synapse_memory;
-create trigger trg_synapse_memory_updated_at
-  before update on synapse_memory
-  for each row
-  execute function set_updated_at();
+-- Function to automatically update the 'updated_at' timestamp column
+-- on any row modification before an update operation occurs.
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  -- Update the timestamp to the exact time of the transaction
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Drop the trigger first if it already exists. This ensures the script
+-- is safely re-runnable, as PostgreSQL lacks a 'CREATE TRIGGER IF NOT EXISTS' syntax.
+DROP TRIGGER IF EXISTS trg_synapse_memory_updated_at ON synapse_memory;
+
+CREATE TRIGGER trg_synapse_memory_updated_at
+  BEFORE UPDATE ON synapse_memory
+  FOR EACH ROW
+  EXECUTE FUNCTION set_updated_at();
 
 ---------------------------------------------------------
 -- 2. Indexes
 ---------------------------------------------------------
 -- Approximate nearest-neighbour search (cosine, matches Voyage)
-create index if not exists idx_synapse_memory_embedding_hnsw
-  on synapse_memory
-  using hnsw (embedding vector_cosine_ops)
-  with (m = 16, ef_construction = 64);
+CREATE INDEX IF NOT EXISTS idx_synapse_memory_embedding_hnsw
+  ON synapse_memory
+  USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 16, ef_construction = 64);
 
 -- Full-text search
-create index if not exists idx_synapse_memory_fts_gin
-  on synapse_memory
-  using gin (fts_content);
+CREATE INDEX IF NOT EXISTS idx_synapse_memory_fts_gin
+  ON synapse_memory
+  USING gin (fts_content);
 
 -- Optional: speeds up the RPC's `filter` (metadata @> filter) argument
-create index if not exists idx_synapse_memory_metadata_gin
-  on synapse_memory
-  using gin (metadata jsonb_path_ops);
+CREATE INDEX IF NOT EXISTS idx_synapse_memory_metadata_gin
+  ON synapse_memory
+  USING gin (metadata jsonb_path_ops);
 
 ---------------------------------------------------------
 -- 3. RPC: match_hybrid_synapse — vector + keyword search fused with RRF
 ---------------------------------------------------------
-create or replace function match_hybrid_synapse (
-  query_text      text,
-  query_embedding vector(1024),
-  match_count     int default 10,
-  filter          jsonb default '{}'::jsonb,
-  rrf_k           int default 60
+CREATE OR REPLACE FUNCTION match_hybrid_synapse (
+  query_text      TEXT,
+  query_embedding VECTOR(1024),
+  match_count     INT DEFAULT 10,
+  filter          JSONB DEFAULT '{}'::jsonb,
+  rrf_k           INT DEFAULT 60
 )
-returns table (id uuid, content text, metadata jsonb, hybrid_score float)
-language plpgsql
-stable
-as $$
-begin
-  return query
-  with q as (
+RETURNS TABLE (id UUID, content TEXT, metadata JSONB, hybrid_score FLOAT)
+LANGUAGE plpgsql
+STABLE
+AS $$
+BEGIN
+  RETURN QUERY
+  WITH q AS (
     -- OR-style keyword query so long drafts still match on any term
-    select nullif(
-      replace(plainto_tsquery('english', query_text)::text, ' & ', ' | '),
+    SELECT NULLIF(
+      REPLACE(plainto_tsquery('english', query_text)::text, ' & ', ' | '),
       ''
-    )::tsquery as tsq
+    )::tsquery AS tsq
   ),
-  semantic as (
-    select
+  semantic AS (
+    SELECT
       sm.id,
-      row_number() over (order by sm.embedding <=> query_embedding) as rank
-    from synapse_memory sm
-    where (filter = '{}'::jsonb or sm.metadata @> filter)
-    order by sm.embedding <=> query_embedding
-    limit match_count * 2
+      ROW_NUMBER() OVER (ORDER BY sm.embedding <=> query_embedding) AS rank
+    FROM synapse_memory sm
+    WHERE (filter = '{}'::jsonb OR sm.metadata @> filter)
+    ORDER BY sm.embedding <=> query_embedding
+    LIMIT match_count * 2
   ),
-  keyword as (
-    select
+  keyword AS (
+    SELECT
       sm.id,
-      row_number() over (order by ts_rank_cd(sm.fts_content, q.tsq) desc) as rank
-    from synapse_memory sm, q
-    where q.tsq is not null
-      and sm.fts_content @@ q.tsq
-      and (filter = '{}'::jsonb or sm.metadata @> filter)
-    order by ts_rank_cd(sm.fts_content, q.tsq) desc
-    limit match_count * 2
+      ROW_NUMBER() OVER (ORDER BY ts_rank_cd(sm.fts_content, q.tsq) DESC) AS rank
+    FROM synapse_memory sm, q
+    WHERE q.tsq IS NOT NULL
+      AND sm.fts_content @@ q.tsq
+      AND (filter = '{}'::jsonb OR sm.metadata @> filter)
+    ORDER BY ts_rank_cd(sm.fts_content, q.tsq) DESC
+    LIMIT match_count * 2
   ),
-  fused as (
-    select
-      coalesce(s.id, k.id) as id,
-      (coalesce(1.0 / (rrf_k + s.rank), 0.0) + coalesce(1.0 / (rrf_k + k.rank), 0.0))::double precision as score
-    from semantic s
-    full outer join keyword k on s.id = k.id
+  fused AS (
+    SELECT
+      COALESCE(s.id, k.id) AS id,
+      (COALESCE(1.0 / (rrf_k + s.rank), 0.0) + COALESCE(1.0 / (rrf_k + k.rank), 0.0))::DOUBLE PRECISION AS score
+    FROM semantic s
+    FULL OUTER JOIN keyword k ON s.id = k.id
   )
-  select sm.id, sm.content, sm.metadata, fused.score as hybrid_score
-  from fused
-  join synapse_memory sm on sm.id = fused.id
-  order by fused.score desc
-  limit match_count;
-end;
+  SELECT sm.id, sm.content, sm.metadata, fused.score AS hybrid_score
+  FROM fused
+  JOIN synapse_memory sm ON sm.id = fused.id
+  ORDER BY fused.score DESC
+  LIMIT match_count;
+END;
 $$;
 ```
 
