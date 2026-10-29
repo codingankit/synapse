@@ -20,7 +20,7 @@ export function ConfirmClearModal({
         </h3>
         <p className="text-xs sm:text-sm text-slate-500 font-medium mt-2 leading-relaxed">
           This will permanently purge all {ruleCount} indexed brand rules from
-          Database. You will need to upload a new Brand Bible PDF.
+          the database. You will need to upload a new Brand Guidelines PDF.
         </p>
 
         <div className="flex items-center gap-3 w-full mt-6 sm:mt-7">

@@ -2,10 +2,10 @@
 
 **A brand-governance memory layer for AI content workflows.**
 
-Upload a Brand Bible (PDF) once. Synapse breaks it into atomic, searchable rules and lets any content pipeline **fetch the relevant rules before generating** and **audit drafts after generating** — from a web console or as [MCP](https://modelcontextprotocol.io) tools an AI agent can call directly.
+Upload Brand Guidelines (PDF) once. Synapse breaks it into atomic, searchable rules and lets any content pipeline **fetch the relevant rules before generating** and **audit drafts after generating** — from a web console or as [MCP](https://modelcontextprotocol.io) tools an AI agent can call directly.
 
 ```
-Brand Bible (PDF) ──► rule atoms ──► Supabase (pgvector + FTS)
+Brand Guidelines (PDF) ──► rule atoms ──► Supabase (pgvector + FTS)
                                           │
               ┌───────────────────────────┴───────────────────────────┐
               ▼                                                       ▼
@@ -60,7 +60,7 @@ synapse/
 
 ## How it works
 
-### 1. Ingest — `ingestBrandBible(buffer, fileName)`
+### 1. Ingest — `ingestBrandGuidelines(buffer, fileName)`
 
 1. **Parse** — the PDF is uploaded to LlamaCloud (agentic tier, custom prompt that recovers tables and describes diagrams) and polled every 3 s, with a 3-minute timeout, until Markdown comes back.
 2. **Chunk** — Markdown-aware splitting (headers first, then paragraphs) into ~8,000-character chunks.
@@ -160,7 +160,7 @@ Or inspect it interactively: `pnpm --filter @synapse/mcp inspector` → transpor
 
 `http://localhost:3000` — a single-page console:
 
-1. **Memory Ingestion** — upload a Brand Bible PDF, see how many rules are active, clear memory (with a confirmation modal). Ingestion is blocked while memory exists; clear first to load a new Brand Bible.
+1. **Memory Ingestion** — upload a Brand Guidelines PDF, see how many rules are active, clear memory (with a confirmation modal). Ingestion is blocked while memory exists; clear first to load new Brand Guidelines.
 2. **Execution Testbench** — paste draft copy and run an audit (locked until memory exists).
 3. **Audit Feedback** — score, `PASS`/`FAIL`, summary, and per-rule violations with reasons and suggested fixes. The console runs audit-only (no auto-rewrite).
 
@@ -355,7 +355,7 @@ Each row's `metadata` holds `category`, `rule`, `context`, `is_negative`, `sourc
 The core package is private to the monorepo and exposes sub-path exports:
 
 ```ts
-import { ingestBrandBible } from "@synapse/core/ingest";
+import { ingestBrandGuidelines } from "@synapse/core/ingest";
 import { getContext } from "@synapse/core/context";
 import { runAudit } from "@synapse/core/audit";
 import { getMemoryStatusCore, clearMemoryCore } from "@synapse/core/memory";
@@ -410,6 +410,6 @@ Scoped as a single-tenant reference implementation. Known gaps and the intended 
 | ------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | Auth                | MCP endpoint and web console are unauthenticated   | API key or OAuth on `/mcp`; session auth on the console                                        |
 | Destructive actions | "Clear Context" deletes all rules                  | Role check + audit log                                                                         |
-| Tenancy             | One Brand Bible per deployment                     | Add a `brand_id` column and filter in the RPC (the `metadata @>` filter already supports this) |
+| Tenancy             | One Brand Guidelines document per deployment       | Add a `brand_id` column and filter in the RPC (the `metadata @>` filter already supports this) |
 | Secrets             | Service-role key, server-side only                 | Per-tenant RLS + anon key                                                                      |
 | Judgement           | Scores come from an LLM bounded by retrieved rules | Human review for high-risk content                                                             |

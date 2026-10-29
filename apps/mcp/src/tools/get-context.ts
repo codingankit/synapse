@@ -12,7 +12,8 @@ export function registerGetContext(server: McpServer) {
       inputSchema: {
         prompt: z
           .string()
-          .min(1)
+          .trim()
+          .min(1, "Prompt cannot be empty or whitespace")
           .describe(
             "The user prompt, brief, or topic for which brand context is required",
           ),

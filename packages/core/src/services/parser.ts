@@ -21,7 +21,7 @@ const MAX_POLL_RETRIES = 60; // 3-minute timeout (60 * 3000ms)
 const MAX_CONSECUTIVE_POLL_ERRORS = 3;
 const POLL_INTERVAL_MS = 3000;
 
-export async function parseBrandBible(
+export async function parseBrandGuidelines(
   fileBuffer: Buffer,
   fileName: string,
 ): Promise<string> {
@@ -142,7 +142,7 @@ export async function parseBrandBible(
       throw err;
     }
 
-    console.error("[Parser] Unhandled exception during parseBrandBible:", err);
+    console.error("[Parser] Unhandled exception during parseBrandGuidelines:", err);
     throw new IngestionError(
       err.message ||
         "Failed to process document due to an unknown provider error.",

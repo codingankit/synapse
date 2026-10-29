@@ -4,7 +4,7 @@ import { geminiExtractionModel, voyageEmbeddingModel } from "../lib/models";
 import { extractionSystemPrompt } from "../lib/prompts";
 import { mapWithConcurrency } from "../lib/concurrency";
 import { supabase, SUPABASE_TABLE } from "../lib/supabase";
-import { parseBrandBible } from "../services/parser";
+import { parseBrandGuidelines } from "../services/parser";
 import {
   type IngestResult,
   type BrandRuleItem,
@@ -33,7 +33,7 @@ function normalize(text: string): string {
     .trim();
 }
 
-/** Same rule extracted from two chunks (or repeated in the bible) is stored once. */
+/** Same rule extracted from two chunks (or repeated in the guidelines) is stored once. */
 function dedupeRules(rules: ExtractedRule[]): ExtractedRule[] {
   const seen = new Set<string>();
   const unique: ExtractedRule[] = [];
@@ -52,14 +52,14 @@ function formatAtom(rule: BrandRuleItem): string {
   return `[Type: ${type}] [Category: ${rule.category}] [Context: ${rule.context}] Rule: ${rule.rule}`;
 }
 
-export async function ingestBrandBible(
+export async function ingestBrandGuidelines(
   fileBuffer: Buffer,
   fileName: string,
 ): Promise<IngestResult> {
   let markdownText = "";
 
   try {
-    markdownText = await parseBrandBible(fileBuffer, fileName);
+    markdownText = await parseBrandGuidelines(fileBuffer, fileName);
     if (!markdownText || !markdownText.trim()) {
       return {
         success: false,

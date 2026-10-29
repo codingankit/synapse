@@ -12,7 +12,8 @@ export function registerAuditContent(server: McpServer) {
       inputSchema: {
         content: z
           .string()
-          .min(1)
+          .trim()
+          .min(1, "Content to audit cannot be empty or whitespace")
           .describe("The draft content or copy to audit against brand memory"),
         max_revisions: z
           .number()

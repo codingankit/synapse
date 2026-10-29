@@ -1,4 +1,5 @@
 import { retrieveAtoms } from "./retrieval";
+import { errorMessage } from "../lib/errors";
 import type { Atom } from "../types/retrieval.type";
 import type { ContextOutcome } from "../types/context.type";
 
@@ -30,26 +31,36 @@ export function formatSystemDirective(atoms: readonly Atom[]): string {
 }
 
 export async function getContext(userPrompt: string): Promise<ContextOutcome> {
-  const result = await retrieveAtoms(userPrompt);
+  try {
+    const result = await retrieveAtoms(userPrompt);
 
-  if (!result.ok) {
-    // An empty store is a successful lookup with nothing found...
-    if (result.reason === "NO_BRAND_MEMORY_STORED") {
-      return {
-        ok: true,
-        hasContext: false,
-        atoms: [],
-        systemDirective: formatSystemDirective([]),
-      };
+    if (!result.ok) {
+      // An empty store is a successful lookup with nothing found...
+      if (result.reason === "NO_BRAND_MEMORY_STORED") {
+        return {
+          ok: true,
+          hasContext: false,
+          atoms: [],
+          systemDirective: formatSystemDirective([]),
+        };
+      }
+      // ...but a provider/database failure must never read as "no constraints".
+      return { ok: false, reason: result.reason, message: result.message };
     }
-    // ...but a provider/database failure must never read as "no constraints".
-    return { ok: false, reason: result.reason, message: result.message };
-  }
 
-  return {
-    ok: true,
-    hasContext: result.atoms.length > 0,
-    atoms: result.atoms,
-    systemDirective: formatSystemDirective(result.atoms),
-  };
+    return {
+      ok: true,
+      hasContext: result.atoms.length > 0,
+      atoms: result.atoms,
+      systemDirective: formatSystemDirective(result.atoms),
+    };
+  } catch (err) {
+    const msg = errorMessage(err, "Context retrieval encountered an unexpected error.");
+    console.error("[Context] getContext failed:", msg);
+    return {
+      ok: false,
+      reason: "DATABASE_RPC_ERROR",
+      message: msg,
+    };
+  }
 }

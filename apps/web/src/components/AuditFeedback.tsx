@@ -8,6 +8,7 @@ import {
   ShieldAlert,
   CheckCircle2,
   Trash2,
+  Loader2,
 } from "lucide-react";
 
 export function AuditFeedback({
@@ -29,9 +30,15 @@ export function AuditFeedback({
           <h2 className="text-xs sm:text-sm font-bold uppercase tracking-wider text-slate-800">
             Audit Feedback
           </h2>
+          {isAuditing && (
+            <span className="flex items-center gap-1.5 text-[10px] sm:text-xs font-semibold text-indigo-500">
+              <Loader2 className="w-3 h-3 animate-spin" />
+              Running…
+            </span>
+          )}
         </div>
 
-        {(auditResults || errorMessage) && (
+        {(auditResults || errorMessage) && !isAuditing && (
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -46,8 +53,24 @@ export function AuditFeedback({
         )}
       </div>
 
-      {/* EMPTY STATE */}
-      {!auditResults && errorMessage ? (
+      {/* LOADING STATE */}
+      {isAuditing ? (
+        <div className="flex-1 flex flex-col items-center justify-center p-6 sm:p-10 text-center space-y-4 bg-slate-50/30 min-h-75 lg:min-h-0">
+          <div className="h-14 w-14 sm:h-16 sm:w-16 rounded-2xl bg-indigo-50 border border-indigo-200 shadow-xs flex items-center justify-center text-indigo-500">
+            <Loader2 className="w-7 h-7 sm:w-8 sm:h-8 animate-spin" />
+          </div>
+          <div className="max-w-sm">
+            <p className="text-sm sm:text-base font-semibold text-slate-800">
+              Cross-examining brand memory…
+            </p>
+            <p className="text-xs sm:text-sm text-slate-500 mt-1.5 leading-relaxed">
+              Retrieving relevant rules, running compliance audit. This may take
+              a few seconds.
+            </p>
+          </div>
+        </div>
+      ) : !auditResults && errorMessage ? (
+        /* ERROR STATE */
         <div className="flex-1 flex flex-col items-center justify-center p-6 sm:p-10 text-center space-y-3 sm:space-y-4 bg-slate-50/30 min-h-75 lg:min-h-0">
           <div className="h-14 w-14 sm:h-16 sm:w-16 rounded-2xl bg-rose-50 border border-rose-200 shadow-xs flex items-center justify-center text-rose-500">
             <AlertTriangle className="w-7 h-7 sm:w-8 sm:h-8" />
@@ -65,6 +88,7 @@ export function AuditFeedback({
           </div>
         </div>
       ) : !auditResults ? (
+        /* EMPTY STATE */
         <div className="flex-1 flex flex-col items-center justify-center p-6 sm:p-10 text-center space-y-3 sm:space-y-4 bg-slate-50/30 min-h-75 lg:min-h-0">
           <div className="h-14 w-14 sm:h-16 sm:w-16 rounded-2xl bg-white border border-slate-200 shadow-xs flex items-center justify-center text-slate-400">
             <FileText className="w-7 h-7 sm:w-8 sm:h-8" />

@@ -126,7 +126,7 @@ export function IngestionCard({
                 Brand Context Active ({ruleCount} Rules)
               </p>
               <p className="text-[11px] sm:text-xs text-slate-500">
-                Clear current context before uploading a new Brand Bible.
+                Clear current context before uploading new Brand Guidelines.
               </p>
             </div>
           </div>
@@ -137,7 +137,7 @@ export function IngestionCard({
             className="w-full sm:w-auto px-4 py-2 bg-white hover:bg-rose-50 border border-slate-200 hover:border-rose-200 text-slate-700 hover:text-rose-600 text-xs font-bold rounded-xl transition-all shadow-2xs disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2 shrink-0"
           >
             {isClearing && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-            <span>Clear Context</span>
+            <span>{isClearing ? "Clearing..." : "Clear Context"}</span>
           </button>
         </div>
       ) : (
@@ -150,7 +150,7 @@ export function IngestionCard({
             <input
               ref={fileInputRef}
               type="file"
-              name="brandBible"
+              name="brandGuidelines"
               accept=".pdf,application/pdf"
               required
               disabled={isUploading || isClearing || isAuditing}

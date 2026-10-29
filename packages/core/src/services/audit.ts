@@ -185,7 +185,17 @@ export async function runAudit(
     MAX_REVISIONS_CAP,
   );
 
-  const final = await auditGraph.invoke({ content, maxRevisions });
+  let final: typeof AuditState.State;
+  try {
+    final = await auditGraph.invoke({ content, maxRevisions });
+  } catch (err) {
+    console.error("[Audit] Unexpected graph execution error:", err);
+    return {
+      ok: false,
+      reason: "LLM_PROVIDER_ERROR",
+      message: errorMessage(err, "Audit pipeline encountered an unexpected error."),
+    };
+  }
 
   if (!final.report) {
     const failure: AuditFailure = final.failure ?? {

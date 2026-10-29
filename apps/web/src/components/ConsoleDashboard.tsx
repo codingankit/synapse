@@ -39,13 +39,21 @@ export function ConsoleDashboard({ initialMemory }: ConsoleDashboardProps) {
     try {
       const status = await getMemoryStatus();
       if (status.error) {
-        setCurrentError(status.error);
+        // Upload succeeded but we can't confirm the rule count — warn the user.
+        setCurrentError(
+          "Upload succeeded, but the rule count could not be refreshed. Try reloading the page if the count looks wrong.",
+        );
         return;
       }
       setHasMemory(status.hasMemory);
       setRuleCount(status.count || 0);
     } catch (err: unknown) {
-      console.error("[refreshMemory] Unexpected error:", err);
+      const msg =
+        err instanceof Error ? err.message : "Failed to refresh memory status.";
+      console.error("[refreshMemory] Unexpected error:", msg);
+      setCurrentError(
+        "Upload succeeded but the memory status could not be refreshed. Try reloading the page.",
+      );
     }
   }, []);
 

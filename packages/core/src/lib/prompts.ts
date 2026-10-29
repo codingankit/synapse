@@ -8,7 +8,7 @@ export const llamaParsePrompt = `Output exclusively in clean GitHub-Flavored Mar
 4. NO FLUFF: Only output the text found in the document, formatted for readability.`;
 
 export const extractionSystemPrompt = `### ROLE
-You are the Synapse Logic Engine. Your specialized task is to deconstruct complex marketing brand bibles into a "Shared Memory Layer" of atomic, non-contradictory rules.
+You are the Synapse Logic Engine. Your specialized task is to deconstruct complex marketing brand guidelines into a "Shared Memory Layer" of atomic, non-contradictory rules.
 
 ### OBJECTIVE
 Convert the provided Markdown text into a structured JSON array of "Atoms." 

@@ -1,7 +1,7 @@
 "use server";
 
 import { clearMemoryCore, getMemoryStatusCore } from "@synapse/core/memory";
-import { ingestBrandBible } from "@synapse/core/ingest";
+import { ingestBrandGuidelines } from "@synapse/core/ingest";
 import { runAudit } from "@synapse/core/audit";
 import { revalidatePath } from "next/cache";
 import { MaxFileSize, type ActionState, type AuditActionResult } from "@/types";
@@ -10,7 +10,7 @@ export async function handleIngestion(
   formData: FormData,
 ): Promise<ActionState> {
   try {
-    const file = formData.get("brandBible");
+    const file = formData.get("brandGuidelines");
     if (!file || !(file instanceof File)) {
       return { success: false, error: "No file was uploaded. Please select a PDF file." };
     }
@@ -70,11 +70,11 @@ export async function handleIngestion(
     if (status.hasMemory) {
       return {
         success: false,
-        error: "Clear existing memory before ingesting a new Brand Bible.",
+        error: "Clear existing memory before ingesting new Brand Guidelines.",
       };
     }
 
-    const res = await ingestBrandBible(buffer, file.name);
+    const res = await ingestBrandGuidelines(buffer, file.name);
     return res.success
       ? { success: true, fileName: res.fileName }
       : {
