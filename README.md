@@ -1,0 +1,437 @@
+# Synapse
+
+**A brand-governance memory layer for AI content workflows.**
+
+Upload Brand Guidelines (PDF) once. Synapse breaks it into atomic, searchable rules and lets any content pipeline **fetch the relevant rules before generating** and **audit drafts after generating** — from a web console or as [MCP](https://modelcontextprotocol.io) tools an AI agent can call directly.
+
+```
+Brand Guidelines (PDF) ──► rule atoms ──► Supabase (pgvector + FTS)
+                                          │
+              ┌───────────────────────────┴───────────────────────────┐
+              ▼                                                       ▼
+   synapse-get-context                                     synapse-audit-content
+   "what must / must not I do?"                            "does this draft comply?"
+   (before generation)                                     (after generation, optional auto-rewrite)
+```
+
+## Highlights
+
+- **Atomic rules** — each extracted rule is one enforceable requirement with a category, context (platform), polarity (requirement / prohibition) and a verbatim source quote.
+- **Hybrid retrieval** — vector search + full-text search fused with Reciprocal Rank Fusion in Postgres, then reranked with Voyage.
+- **Prohibitions are prioritised** — prohibitions and `Global` rules (up to 30) are pulled into the candidate pool regardless of semantic similarity, and up to 5 are kept even if the reranker scores them low. A warning is logged if the cap is hit.
+- **Verbatim directives** — `get-context` returns the stored rules as-is, split into `MUST FOLLOW` / `MUST NOT`. No LLM paraphrase of a legal rule, and latency stays at embed + search + rerank.
+- **Status is derived in code** — the LLM returns a score and violations; `PASS` requires `score >= 80` and no violated prohibition.
+- **Audit → rewrite → re-audit loop** — optionally rewrites a failing draft and re-audits it (up to 3 revisions).
+- **Fails loudly** — an outage is never reported as "no rules apply". Every retrieval/audit/context call returns an explicit `ok: false` with a typed reason.
+- **Prompt-injection fencing** — draft content is treated as untrusted data inside `<proposed_content>` tags; fence tags are stripped from user text before it reaches a prompt.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  AGENT["AI agent / MCP client"] -->|"Streamable HTTP /mcp"| MCP["apps/mcp<br/>Hono MCP server"]
+  BROWSER["Browser"] --> WEB["apps/web<br/>Next.js console"]
+  WEB -->|"Server Actions"| CORE["packages/core<br/>@synapse/core"]
+  MCP --> CORE
+  CORE --> LC["LlamaCloud<br/>PDF to Markdown"]
+  CORE --> GEM["Gemini<br/>extract / audit / rewrite"]
+  CORE --> VOY["Voyage AI<br/>embed + rerank"]
+  CORE --> SB[("Supabase Postgres<br/>pgvector + FTS")]
+```
+
+Turborepo + pnpm monorepo:
+
+```
+synapse/
+├── apps/
+│   ├── web/    Next.js 16 console — ingest, audit, clear memory
+│   └── mcp/    Hono MCP server — synapse-get-context, synapse-audit-content
+└── packages/
+    └── core/   @synapse/core — parse, ingest, retrieve, context, audit, memory
+```
+
+| Layer     | Stack                                                                              |
+| --------- | ---------------------------------------------------------------------------------- |
+| Web       | Next.js 16 (React 19, React Compiler, Server Actions), Tailwind v4, Radix / shadcn |
+| MCP       | Hono, `@hono/mcp` `StreamableHTTPTransport`, `@modelcontextprotocol/sdk`           |
+| Core      | TypeScript (ESM), Vercel AI SDK, LangGraph, LangChain text splitters, Zod          |
+| Providers | LlamaCloud (parsing), Google Gemini (LLM), Voyage AI (embeddings + rerank)         |
+| Storage   | Supabase Postgres with `pgvector` (HNSW) and `tsvector` (GIN)                      |
+
+## How it works
+
+### 1. Ingest — `ingestBrandGuidelines(buffer, fileName)`
+
+1. **Parse** — the PDF is uploaded to LlamaCloud (agentic tier, custom prompt that recovers tables and describes diagrams) and polled every 3 s, with a 3-minute timeout, until Markdown comes back. A single network blip doesn't abort the job — polling gives up only after 3 consecutive poll errors.
+2. **Chunk** — Markdown-aware splitting (headers first, then paragraphs) into ~8,000-character chunks.
+3. **Extract** — Gemini extracts rule atoms from each chunk (3 chunks in parallel) using a strict schema: `category`, `rule`, `context`, `is_negative`, `source_quote`. Extraction is **all-or-nothing**: one failed chunk fails the ingest instead of silently dropping rules.
+4. **Dedupe** — identical rules (same polarity + context + normalized text) are stored once.
+5. **Embed** — each atom is embedded as `[Type: REQUIREMENT|PROHIBITION] [Category: …] [Context: …] Rule: …` (batches of 30). Putting the type in the text means the reranker and audit LLM can see prohibitions.
+6. **Store** — rows are inserted in batches of 50. If any batch fails, rows already inserted are **rolled back**.
+
+Failures return `{ success: false, stage, error, code? }` — stages: `PARSER_FAILURE`, `EXTRACTION_FAILURE`, `NO_RULES_FOUND`, `EMBEDDING_FAILURE`, `EMBEDDING_MISMATCH`, `DATABASE_WRITE_FAILURE`. For `PARSER_FAILURE`, `code` narrows it further: `PARSER_TIMEOUT`, `PARSER_PROVIDER_ERROR`, `PARSER_EMPTY_RESULT`, or `CONFIG_ERROR` (missing `LLAMA_CLOUD_API_KEY`).
+
+### 2. Retrieve — `retrieveAtoms(query)` (internal)
+
+```
+embed(query) ─┬─► match_hybrid_synapse RPC (vector + FTS, RRF k=60, top 20) ─┐
+              └─► pinned rules (is_negative = true OR context = "Global", ≤30) ┴─► merge + dedupe ─► rerank
+                                                                                                        │
+                                              top 10 by relevance + up to 5 pinned rules ranked lower ◄─┘
+```
+
+- If the reranker fails, retrieval falls back to hybrid order instead of failing.
+- If the pinned-rule query fails, retrieval degrades to similarity-only.
+- The pinned-rule fetch is `limit(30)` with no ordering. With more than 30 prohibitions/`Global` rules, which 30 are fetched is arbitrary (a warning is logged).
+- Embedding or RPC failure → `{ ok: false, reason }`. An empty store → `NO_BRAND_MEMORY_STORED`.
+
+### 3. Context — `getContext(prompt)`
+
+Retrieves atoms and formats them deterministically:
+
+```
+### SYNAPSE BRAND GOVERNANCE DIRECTIVE ###
+You are generating content on behalf of the brand. Follow these rules exactly.
+
+MUST FOLLOW:
+  ✓ [Type: REQUIREMENT] [Category: Tone] [Context: Instagram] Rule: Use a friendly, conversational voice.
+
+MUST NOT:
+  ✗ [Type: PROHIBITION] [Category: Restriction] [Context: Global] Rule: Do not use the word "cheap".
+
+Do not reference these rules directly in your final output unless explicitly asked.
+```
+
+An empty memory store is a _successful_ lookup (`hasContext: false`, with a plain "no brand rules are stored" directive). A provider or database failure is `ok: false` — never confused with "no constraints".
+
+### 4. Audit — `runAudit(content, { maxRevisions })`
+
+```mermaid
+flowchart LR
+  R["retrieve"] -->|"retrieval failed"| F(["END: ok=false"])
+  R --> A["audit"]
+  A -->|"PASS, halted, or no revisions left"| D(["END: report"])
+  A -->|"FAIL and revisions left"| W["rewrite"]
+  W --> A
+```
+
+- The audit LLM sees only the retrieved rules (as `<rule id="…">`) and must cite a `rule_id` for every violation. Cited IDs are resolved back to the rule text.
+- **Scoring:** `100` = perfect, `80–99` = `PASS` with minor tone adjustments, `0–79` = `FAIL`. Status is computed in code; any violated prohibition forces `FAIL` regardless of score.
+- `maxRevisions` is clamped to `0–3` (default `0` = audit only). With `N` revisions, up to `N + 1` audits run.
+- If a rewrite or re-audit fails mid-loop, the last good report is kept and the loop halts.
+- `revisedContent` is returned only when the audited draft differs from the input.
+
+## MCP server
+
+Served over Streamable HTTP at **`http://localhost:7000/mcp`** (stateless — a fresh MCP server instance per request). Any other path returns a JSON `404`. On startup the server checks its required environment variables and exits with a clear message if any are missing.
+
+### `synapse-get-context`
+
+Call **before** generating content.
+
+|                         |                                                              |
+| ----------------------- | ------------------------------------------------------------ |
+| **Input**               | `prompt: string` — the brief, prompt, or topic               |
+| **Output (text)**       | the formatted directive above                                |
+| **Output (structured)** | `has_context: boolean`, `rules: { id, rule, is_negative }[]` |
+| **On failure**          | `isError: true` — "Do NOT assume that no brand rules apply." |
+
+### `synapse-audit-content`
+
+Call **after** drafting.
+
+|                         |                                                                                                                                              |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Input**               | `content: string`, `max_revisions?: 0–3` (default `0`)                                                                                       |
+| **Output (text)**       | human-readable audit report                                                                                                                  |
+| **Output (structured)** | `status: "PASS" \| "FAIL"`, `score`, `feedback`, `violations: { rule_id, rule?, reason, suggested_fix }[]`, `revised_content?`, `audits_run` |
+| **On failure**          | `isError: true` — "The content was NOT audited."                                                                                             |
+
+In `synapse-get-context`, `rules[].rule` is the stored atom string (`[Type: …] [Category: …] [Context: …] Rule: …`). In `synapse-audit-content`, `violations[].rule` is the bare rule text.
+
+Both tools are annotated `readOnlyHint: true`.
+
+**Connect a client** (example with Claude Code):
+
+```bash
+claude mcp add --transport http synapse http://localhost:7000/mcp
+```
+
+Or inspect it interactively: `pnpm --filter @synapse/mcp inspector` → transport **Streamable HTTP** → `http://localhost:7000/mcp`.
+
+## Web console
+
+`http://localhost:3000` — a single-page console:
+
+1. **Memory Ingestion** — upload a Brand Guidelines PDF, see how many rules are active, clear memory (with a confirmation modal). Uploads are limited to **5 MB**. The client checks size, non-empty, `.pdf` extension and PDF MIME type; the Server Action repeats those checks and additionally verifies the `%PDF` magic bytes. Ingestion is blocked while memory exists; clear first to load new Brand Guidelines.
+2. **Execution Testbench** — paste draft copy and run an audit (locked until memory exists).
+3. **Audit Feedback** — score, `PASS`/`FAIL`, summary, and per-rule violations with reasons and suggested fixes. The console runs audit-only (no auto-rewrite).
+
+## Getting started
+
+### Prerequisites
+
+- **Node.js 24**
+- **pnpm 12.6.0** — pinned via `packageManager` (run `corepack enable`)
+- A **Supabase** project
+- API keys for **Voyage AI**, **Google AI (Gemini)**, and **LlamaCloud**
+
+### Setup
+
+```bash
+pnpm install
+
+cp apps/web/.env.example apps/web/.env
+cp apps/mcp/.env.example apps/mcp/.env
+# fill in both files (see Environment variables)
+
+# run the SQL from "Database setup" in the Supabase SQL editor, then:
+pnpm dev
+```
+
+`pnpm dev` builds `@synapse/core`, then starts core in watch mode plus both apps via Turborepo.
+
+| Service     | URL                       |
+| ----------- | ------------------------- |
+| Web console | http://localhost:3000     |
+| MCP server  | http://localhost:7000/mcp |
+
+### Production
+
+```bash
+pnpm build
+pnpm --filter @synapse/mcp start    # node --env-file-if-exists=.env dist/main.js
+pnpm --filter @synapse/web start    # next start
+```
+
+## Environment variables
+
+The Supabase, Voyage, and Google keys are needed by **both** `apps/web` and `apps/mcp`. `LLAMA_CLOUD_API_KEY` is only used when ingesting a PDF, so it is only needed by `apps/web`. See each app's `.env.example`.
+
+| Variable                       | Required | Description                                                |
+| ------------------------------ | :------: | ---------------------------------------------------------- |
+| `SUPABASE_URL`                 |    ✅    | Supabase project URL                                       |
+| `SUPABASE_SERVICE_ROLE_KEY`    |    ✅    | Service-role key (bypasses RLS — keep server-side)         |
+| `VOYAGE_API_KEY`               |    ✅    | Embeddings + reranking                                     |
+| `GOOGLE_GENERATIVE_AI_API_KEY` |    ✅    | Gemini: rule extraction, audit, rewrite                    |
+| `LLAMA_CLOUD_API_KEY`          | web only | PDF parsing (ingest only — the MCP server never ingests)   |
+| `GEMINI_EXTRACTION_MODEL`      | web only | Default `gemini-3.5-flash`. Rule extraction (ingest only). |
+| `GEMINI_AUDIT_MODEL`           |          | Default `gemini-3.5-flash` (used for audit and rewrite)    |
+| `VOYAGE_EMBEDDING_MODEL`       |          | Default `voyage-4-lite`                                    |
+| `VOYAGE_RERANKING_MODEL`       |          | Default `rerank-2.5-lite`                                  |
+| `PORT`                         |          | MCP only (default `7000`); Next.js manages its own         |
+| `NODE_ENV`                     |          | MCP only (default `development`); Next.js sets its own     |
+
+> The table name is fixed to `synapse_memory` in `packages/core/src/lib/supabase.ts`.
+
+## Database setup
+
+Run once in the Supabase SQL editor. This creates the table, indexes, and the hybrid-search RPC that retrieval calls.
+
+> The `vector(1024)` size must match your embedding model's output. It fits the default `voyage-4-lite`; if you override `VOYAGE_EMBEDDING_MODEL` with a model of a different dimension, change it in both the table and the RPC.
+
+```sql
+---------------------------------------------------------
+-- 0. Extension
+---------------------------------------------------------
+-- Enable the pgvector extension to support vector data types and similarity search
+CREATE EXTENSION IF NOT EXISTS vector;
+
+---------------------------------------------------------
+-- 1. Table: synapse_memory
+---------------------------------------------------------
+CREATE TABLE IF NOT EXISTS synapse_memory (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  content     TEXT NOT NULL,
+  embedding   VECTOR(1024) NOT NULL,
+  metadata    JSONB NOT NULL DEFAULT '{}'::jsonb,
+  fts_content TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Enable Row Level Security (RLS) to enforce data isolation and
+-- ensure queries only access rows permitted by active security policies.
+ALTER TABLE synapse_memory ENABLE ROW LEVEL SECURITY;
+
+-- Function to automatically update the 'updated_at' timestamp column
+-- on any row modification before an update operation occurs.
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  -- Update the timestamp to the exact time of the transaction
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Drop the trigger first if it already exists. This ensures the script
+-- is safely re-runnable, as PostgreSQL lacks a 'CREATE TRIGGER IF NOT EXISTS' syntax.
+DROP TRIGGER IF EXISTS trg_synapse_memory_updated_at ON synapse_memory;
+
+CREATE TRIGGER trg_synapse_memory_updated_at
+  BEFORE UPDATE ON synapse_memory
+  FOR EACH ROW
+  EXECUTE FUNCTION set_updated_at();
+
+---------------------------------------------------------
+-- 2. Indexes
+---------------------------------------------------------
+-- Approximate nearest-neighbour search (cosine, matches Voyage)
+CREATE INDEX IF NOT EXISTS idx_synapse_memory_embedding_hnsw
+  ON synapse_memory
+  USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 16, ef_construction = 64);
+
+-- Full-text search
+CREATE INDEX IF NOT EXISTS idx_synapse_memory_fts_gin
+  ON synapse_memory
+  USING gin (fts_content);
+
+-- Optional: speeds up the RPC's `filter` (metadata @> filter) argument
+CREATE INDEX IF NOT EXISTS idx_synapse_memory_metadata_gin
+  ON synapse_memory
+  USING gin (metadata jsonb_path_ops);
+
+---------------------------------------------------------
+-- 3. RPC: match_hybrid_synapse — vector + keyword search fused with RRF
+---------------------------------------------------------
+CREATE OR REPLACE FUNCTION match_hybrid_synapse (
+  query_text      TEXT,
+  query_embedding VECTOR(1024),
+  match_count     INT DEFAULT 10,
+  filter          JSONB DEFAULT '{}'::jsonb,
+  rrf_k           INT DEFAULT 60
+)
+RETURNS TABLE (id UUID, content TEXT, metadata JSONB, hybrid_score FLOAT)
+LANGUAGE plpgsql
+STABLE
+AS $$
+BEGIN
+  RETURN QUERY
+  WITH q AS (
+    -- OR-style keyword query so long drafts still match on any term
+    SELECT NULLIF(
+      REPLACE(plainto_tsquery('english', query_text)::text, ' & ', ' | '),
+      ''
+    )::tsquery AS tsq
+  ),
+  semantic AS (
+    SELECT
+      sm.id,
+      ROW_NUMBER() OVER (ORDER BY sm.embedding <=> query_embedding) AS rank
+    FROM synapse_memory sm
+    WHERE (filter = '{}'::jsonb OR sm.metadata @> filter)
+    ORDER BY sm.embedding <=> query_embedding
+    LIMIT match_count * 2
+  ),
+  keyword AS (
+    SELECT
+      sm.id,
+      ROW_NUMBER() OVER (ORDER BY ts_rank_cd(sm.fts_content, q.tsq) DESC) AS rank
+    FROM synapse_memory sm, q
+    WHERE q.tsq IS NOT NULL
+      AND sm.fts_content @@ q.tsq
+      AND (filter = '{}'::jsonb OR sm.metadata @> filter)
+    ORDER BY ts_rank_cd(sm.fts_content, q.tsq) DESC
+    LIMIT match_count * 2
+  ),
+  fused AS (
+    SELECT
+      COALESCE(s.id, k.id) AS id,
+      (COALESCE(1.0 / (rrf_k + s.rank), 0.0) + COALESCE(1.0 / (rrf_k + k.rank), 0.0))::DOUBLE PRECISION AS score
+    FROM semantic s
+    FULL OUTER JOIN keyword k ON s.id = k.id
+  )
+  SELECT sm.id, sm.content, sm.metadata, fused.score AS hybrid_score
+  FROM fused
+  JOIN synapse_memory sm ON sm.id = fused.id
+  ORDER BY fused.score DESC
+  LIMIT match_count;
+END;
+$$;
+```
+
+Each row's `metadata` holds `category`, `rule`, `context`, `is_negative`, `source_quote`, `chunk_index`, `source_file`, and `ingested_at`.
+
+## Using `@synapse/core` directly
+
+The core package is private to the monorepo and exposes sub-path exports:
+
+```ts
+import {
+  ingestBrandGuidelines,
+  parseBrandGuidelines,
+} from "@synapse/core/ingest";
+import { getContext } from "@synapse/core/context";
+import { runAudit } from "@synapse/core/audit";
+import { getMemoryStatusCore, clearMemoryCore } from "@synapse/core/memory";
+
+// Before generation
+const ctx = await getContext("Write an Instagram caption for our spring sale");
+if (!ctx.ok) throw new Error(`${ctx.reason}: ${ctx.message}`); // don't proceed as if no rules apply
+const systemPrompt = ctx.systemDirective;
+
+// After generation
+const outcome = await runAudit(draft, { maxRevisions: 2 });
+if (outcome.ok) {
+  console.log(outcome.report.status, outcome.report.score);
+  console.log(outcome.revisedContent ?? draft);
+}
+```
+
+`parseBrandGuidelines(buffer, fileName)` runs only the PDF → Markdown step (LlamaCloud) and returns the Markdown without storing anything — handy for inspecting what the parser recovers before you ingest.
+
+Result types:
+
+- `ContextOutcome` — `ok: true` carries `hasContext`, `atoms`, `systemDirective`; `ok: false` carries `reason` + `message`.
+- `AuditOutcome` — `ok: true` carries `report`, `revisedContent`, `atoms`, and `metadata` (`auditsRun`, `revisionsApplied`, `atomsEvaluated`); `ok: false` carries `reason` + `message`.
+- `IngestResult` — `{ success: true, fileName, atomsIngested }` or `{ success: false, error, stage, code? }`.
+- `getMemoryStatusCore()` → `{ hasMemory, count, error? }`; `clearMemoryCore()` → `MemoryClearResult` (`{ success: true }` or `{ success: false, error }`).
+
+Failure reasons: `EMBEDDING_PROVIDER_ERROR`, `DATABASE_RPC_ERROR`, `NO_BRAND_MEMORY_STORED` (audit only — `getContext` treats it as success), `LLM_PROVIDER_ERROR` (audit only).
+
+## Scripts
+
+| Command                                | What it does                         |
+| -------------------------------------- | ------------------------------------ |
+| `pnpm dev`                             | Core in watch mode + web + MCP       |
+| `pnpm build`                           | Build everything (core builds first) |
+| `pnpm typecheck`                       | `tsc --noEmit` across the workspace  |
+| `pnpm --filter @synapse/mcp inspector` | Open the MCP Inspector               |
+
+## Tuning
+
+Constants you may want to adjust (in `packages/core/src` unless noted):
+
+| Constant                                  | File                          | Default       |
+| ----------------------------------------- | ----------------------------- | ------------- |
+| `AUDIT_PASS_THRESHOLD`                    | `types/audit.type.ts`         | `80`          |
+| `MAX_REVISIONS_CAP`                       | `services/audit.ts`           | `3`           |
+| `HYBRID_MATCH_COUNT` / `RRF_K`            | `services/retrieval.ts`       | `20` / `60`   |
+| `RERANK_TOP_N`                            | `services/retrieval.ts`       | `10`          |
+| `PINNED_FETCH_LIMIT` / `PINNED_MAX_EXTRA` | `services/retrieval.ts`       | `30` / `5`    |
+| `CHUNK_SIZE_CHARS`                        | `services/ingest.ts`          | `8000`        |
+| `EXTRACTION_CONCURRENCY`                  | `services/ingest.ts`          | `3`           |
+| `EMBED_BATCH_SIZE` / `DB_BATCH_SIZE`      | `services/ingest.ts`          | `30` / `50`   |
+| `MAX_POLL_RETRIES` / `POLL_INTERVAL_MS`   | `services/parser.ts`          | `60` / `3000` |
+| `MAX_CONSECUTIVE_POLL_ERRORS`             | `services/parser.ts`          | `3`           |
+| `MaxFileSize.MB` (web upload limit)       | `apps/web/src/types/index.ts` | `5`           |
+
+> If you raise `MaxFileSize.MB`, also raise `experimental.serverActions.bodySizeLimit` (currently `10mb`) in `apps/web/next.config.ts`, otherwise large uploads are rejected before they reach the action.
+
+## Security & limitations
+
+Scoped as a single-tenant reference implementation. Known gaps and the intended fix:
+
+| Area                | Current state                                      | Production path                                                                                |
+| ------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Auth                | MCP endpoint and web console are unauthenticated   | API key or OAuth on `/mcp`; session auth on the console                                        |
+| Destructive actions | "Clear Context" deletes all rules                  | Role check + audit log                                                                         |
+| Tenancy             | One Brand Guidelines document per deployment       | Add a `brand_id` column and filter in the RPC (the `metadata @>` filter already supports this) |
+| Secrets             | Service-role key, server-side only                 | Per-tenant RLS + anon key                                                                      |
+| Judgement           | Scores come from an LLM bounded by retrieved rules | Human review for high-risk content                                                             |
+
+## License
+
+[MIT](./LICENSE) © 2026 [Ankit Dutta](https://github.com/codingankit)
